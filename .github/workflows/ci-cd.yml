@@ -13,11 +13,11 @@ jobs:
     env:
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      NEXUS_URL: http://100.25.216.250:8081/
+      NEXUS_URL: http://100.25.216.250:8081
       NEXUS_REPO: maven-releases
       NEXUS_GROUP: com/web/cal
       NEXUS_ARTIFACT: webapp-add
-      TOMCAT_URL: http://50.16.12.7:8080/
+      TOMCAT_URL: http://50.16.12.7:8080/manager/text
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
     steps:
@@ -43,8 +43,8 @@ jobs:
           mvn clean verify sonar:sonar \
             -DskipTests \
             -Dsonar.projectKey=JavaWebCalculator \
-            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
-            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+            -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
+            -Dsonar.login=${{ env.SONAR_TOKEN }}
 
       - name: ⚙️ Build WAR File
         run: |
@@ -61,7 +61,7 @@ jobs:
           WAR_FILE=$(ls target/*.war | head -1)
           VERSION="0.0.${{ github.run_number }}"
           echo "📦 Uploading WAR to Nexus version $VERSION ..."
-          curl -u ${NEXUS_USER}:${NEXUS_PASS} --upload-file "$WAR_FILE" \
+          curl -v -u ${NEXUS_USER}:${NEXUS_PASS} --upload-file "$WAR_FILE" \
             "${{ env.NEXUS_URL }}/repository/${{ env.NEXUS_REPO }}/${{ env.NEXUS_GROUP }}/${{ env.NEXUS_ARTIFACT }}/${VERSION}/${{ env.NEXUS_ARTIFACT }}-${VERSION}.war"
           echo "✅ Uploaded successfully."
 
@@ -76,13 +76,16 @@ jobs:
           APP_NAME="webapp-add"
           cd /tmp; rm -f *.war
 
+          echo "⏳ Waiting 10s for Nexus indexing..."
+          sleep 10
+
           echo "🔍 Fetching latest WAR from Nexus..."
           DOWNLOAD_URL=$(curl -s -u ${NEXUS_USER}:${NEXUS_PASS} \
-            "${{ env.NEXUS_URL }}/service/rest/v1/search/assets?repository=${{ env.NEXUS_REPO }}" \
-            | grep -oP '"downloadUrl"\s*:\s*"[^"]*webapp-add-[0-9.]+\.war' | tail -1 | cut -d'"' -f4)
+            "${{ env.NEXUS_URL }}/service/rest/v1/search/assets?repository=${{ env.NEXUS_REPO }}&group=${{ env.NEXUS_GROUP }}&name=${{ env.NEXUS_ARTIFACT }}" \
+            | jq -r '.items[-1].downloadUrl')
 
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "❌ No WAR found in Nexus!"
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "❌ No WAR found for $APP_NAME in Nexus!"
             exit 1
           fi
 
@@ -90,15 +93,11 @@ jobs:
           curl -u ${NEXUS_USER}:${NEXUS_PASS} -O "$DOWNLOAD_URL"
           WAR_FILE=$(basename "$DOWNLOAD_URL")
 
-          echo "🧹 Undeploying old application..."
+          echo "🧹 Undeploying old app..."
           curl -u ${TOMCAT_USER}:${TOMCAT_PASS} "${{ env.TOMCAT_URL }}/undeploy?path=/${APP_NAME}" || true
           sleep 5
 
-          echo "🧼 Cleaning Tomcat cache directories via manager text..."
-          curl -u ${TOMCAT_USER}:${TOMCAT_PASS} "${{ env.TOMCAT_URL }}/expire?path=/${APP_NAME}" || true
-          curl -u ${TOMCAT_USER}:${TOMCAT_PASS} "${{ env.TOMCAT_URL }}/reload?path=/${APP_NAME}" || true
-
-          echo "🚀 Deploying fresh WAR to Tomcat..."
+          echo "🚀 Deploying new WAR..."
           curl -u ${TOMCAT_USER}:${TOMCAT_PASS} --upload-file "$WAR_FILE" \
             "${{ env.TOMCAT_URL }}/deploy?path=/${APP_NAME}&update=true"
 
@@ -115,3 +114,17 @@ jobs:
             echo "⚠️ App returned status $STATUS"
             exit 1
           fi
+
+      - name: 💬 Notify Slack - Deployment Success
+        if: success()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"✅ Java WebApp successfully deployed to Tomcat! Build: '${{ github.run_number }}'"}' \
+            ${{ env.SLACK_WEBHOOK_URL }}
+
+      - name: 💬 Notify Slack - Deployment Failed
+        if: failure()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"❌ Deployment failed in workflow *'${{ github.workflow }}'*! Please check GitHub Actions logs."}' \
+            ${{ env.SLACK_WEBHOOK_URL }}
