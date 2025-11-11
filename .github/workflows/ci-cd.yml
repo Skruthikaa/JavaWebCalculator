@@ -13,11 +13,11 @@ jobs:
     env:
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      NEXUS_URL: http://13.221.84.194:8081/
+      NEXUS_URL: http://100.25.216.250:8081/
       NEXUS_REPO: maven-releases
       NEXUS_GROUP: com/web/cal
       NEXUS_ARTIFACT: webapp-add
-      TOMCAT_URL: http://54.175.160.128:8080/
+      TOMCAT_URL: http://50.16.12.7:8080/
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
     steps:
