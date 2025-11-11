@@ -12,11 +12,11 @@ jobs:
     env:
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      NEXUS_URL: http://100.25.216.250:8081/
+      NEXUS_URL: http://100.25.216.250:8081          # ❌ no trailing slash
       NEXUS_REPO: maven-releases
       NEXUS_GROUP: com/web/cal
       NEXUS_ARTIFACT: webapp-add
-      TOMCAT_URL: http://50.16.12.7:8080/
+      TOMCAT_URL: http://50.16.12.7:8080/manager/text
       BUILD_VER: 0.0.${{ github.run_number }}
 
     steps:
@@ -41,7 +41,7 @@ jobs:
           ${{ runner.os }}-maven-
 
     # --- Run SonarQube Analysis ---
-    - name: 🔍 SonarQube Analysis (Self-Hosted)
+    - name: 🔍 SonarQube Analysis
       run: |
         mvn clean verify sonar:sonar \
           -DskipTests \
@@ -84,17 +84,33 @@ jobs:
         cd /tmp; rm -f *.war
 
         echo "🔍 Fetching latest WAR from Nexus..."
-        # Convert com/web/cal -> com.web.cal for Nexus search
         GROUP_DOTS=$(echo "${{ env.NEXUS_GROUP }}" | tr '/' '.')
-        DOWNLOAD_URL=$(curl -s -u ${NEXUS_USER}:${NEXUS_PASS} \
-          "${{ env.NEXUS_URL }}/service/rest/v1/search/assets?repository=${{ env.NEXUS_REPO }}&group=${GROUP_DOTS}&name=${{ env.NEXUS_ARTIFACT }}" \
-          | jq -r '.items[-1].downloadUrl // empty')
+        
+        # Try up to 5 times (allowing Nexus time to index)
+        for i in {1..5}; do
+          echo "⏳ Attempt $i to get Nexus JSON..."
+          RESPONSE=$(curl -s -u ${NEXUS_USER}:${NEXUS_PASS} \
+            "${{ env.NEXUS_URL }}/service/rest/v1/search/assets?repository=${{ env.NEXUS_REPO }}&group=${GROUP_DOTS}&name=${{ env.NEXUS_ARTIFACT }}")
+          
+          if echo "$RESPONSE" | jq empty >/dev/null 2>&1; then
+            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.items[-1].downloadUrl // empty')
+            if [ -n "$DOWNLOAD_URL" ]; then
+              echo "✅ Found WAR in Nexus: $DOWNLOAD_URL"
+              break
+            fi
+          else
+            echo "⚠️ Nexus returned invalid JSON (possibly still indexing)."
+          fi
+          
+          echo "⏳ Waiting 15s before retry..."
+          sleep 15
+        done
 
-        # Fallback: Direct path if index not updated
+        # Fallback if still empty
         if [ -z "$DOWNLOAD_URL" ]; then
           VERSION=${{ env.BUILD_VER }}
           DOWNLOAD_URL="${{ env.NEXUS_URL }}/repository/${{ env.NEXUS_REPO }}/${{ env.NEXUS_GROUP }}/${{ env.NEXUS_ARTIFACT }}/${VERSION}/${{ env.NEXUS_ARTIFACT }}-${VERSION}.war"
-          echo "⚠️ Nexus search returned empty, using direct URL: $DOWNLOAD_URL"
+          echo "⚠️ Using fallback direct URL: $DOWNLOAD_URL"
         fi
 
         echo "⬇️ Downloading WAR from: $DOWNLOAD_URL"
@@ -102,12 +118,12 @@ jobs:
         WAR_FILE=$(basename "$DOWNLOAD_URL")
 
         echo "🧹 Removing old app from Tomcat..."
-        curl -u ${TOMCAT_USER}:${TOMCAT_PASS} "${{ env.TOMCAT_URL }}/manager/text/undeploy?path=/${APP_NAME}" || true
+        curl -u ${TOMCAT_USER}:${TOMCAT_PASS} "${{ env.TOMCAT_URL }}/undeploy?path=/${APP_NAME}" || true
         sleep 5
 
         echo "🚀 Deploying new WAR to Tomcat..."
         curl -u ${TOMCAT_USER}:${TOMCAT_PASS} --upload-file "$WAR_FILE" \
-          "${{ env.TOMCAT_URL }}/manager/text/deploy?path=/${APP_NAME}&update=true"
+          "${{ env.TOMCAT_URL }}/deploy?path=/${APP_NAME}&update=true"
 
         echo "✅ Deployment completed successfully!"
 
@@ -115,10 +131,10 @@ jobs:
     - name: 🔎 Verify Tomcat Deployment
       run: |
         sleep 15
-        STATUS=$(curl -o /dev/null -s -w "%{http_code}" ${{ env.TOMCAT_URL }}/${{ env.NEXUS_ARTIFACT }}/)
+        STATUS=$(curl -o /dev/null -s -w "%{http_code}" http://50.16.12.7:8080/webapp-add/)
         if [ "$STATUS" -eq 200 ]; then
-          echo "✅ Application is LIVE at ${{ env.TOMCAT_URL }}/${{ env.NEXUS_ARTIFACT }}/"
+          echo "✅ Application is LIVE at http://50.16.12.7:8080/webapp-add/"
         else
-          echo "⚠️ App responded with status $STATUS"
+          echo "⚠️ Application returned HTTP $STATUS"
           exit 1
         fi
